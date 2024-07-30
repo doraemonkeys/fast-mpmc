@@ -31,6 +31,14 @@ func NewFastMpmc[T any](bufMinCap int) *FastMpmc[T] {
 	}
 }
 
+// enableSignal give a signal indicating that the buffer is not empty
+func (b *FastMpmc[T]) enableSignal() {
+	select {
+	case b.popAllCondChan <- struct{}{}:
+	default:
+	}
+}
+
 // Push adds one or more elements to the queue.
 func (b *FastMpmc[T]) Push(v ...T) {
 	b.PushSlice(v)
@@ -71,15 +79,60 @@ func (b *FastMpmc[T]) popAll() *[]T {
 	return ret
 }
 
-// enableSignal give a signal indicating that the buffer is not empty
-func (b *FastMpmc[T]) enableSignal() {
-	select {
-	case b.popAllCondChan <- struct{}{}:
-	default:
+// swapWhenNotEmpty swaps the current buffer with the provided new buffer only if the current buffer is not empty.
+// If the swap is performed, it returns the old buffer. If the current buffer is empty, it returns nil.
+//
+// The caller should wait the signal before calling this function.
+func (b *FastMpmc[T]) swapWhenNotEmpty(newBuffer *[]T) *[]T {
+	var ret *[]T
+
+	b.bufferMu.Lock()
+	defer b.bufferMu.Unlock()
+
+	if len(*b.buffer) == 0 {
+		// low probability
+		return nil
+	}
+
+	ret = b.buffer
+	b.buffer = newBuffer
+
+	// case 1: non-empty buffer -> non-empty buffer
+	if len(*newBuffer) != 0 {
+		b.enableSignal()
+	}
+	// case 2: non-empty buffer -> empty buffer, do nothing
+
+	return ret
+}
+
+// WaitSwapBuffer waits for a signal indicating that the buffer is not empty,
+// then swaps the current buffer with the provided new buffer and returns the old buffer.
+// This method blocks until the buffer is not empty and the swap is performed.
+func (b *FastMpmc[T]) WaitSwapBuffer(newBuffer *[]T) *[]T {
+	for range b.popAllCondChan {
+		if elements := b.swapWhenNotEmpty(newBuffer); elements != nil {
+			return elements
+		}
+	}
+	panic("unreachable")
+}
+
+// WaitSwapBufferContext like WaitSwapBuffer but with a context.
+func (b *FastMpmc[T]) WaitSwapBufferContext(ctx context.Context, newBuffer *[]T) (*[]T, bool) {
+	for {
+		select {
+		case <-b.popAllCondChan:
+			if elements := b.swapWhenNotEmpty(newBuffer); elements != nil {
+				return elements, true
+			}
+		case <-ctx.Done():
+			return nil, false
+		}
 	}
 }
 
-// SwapBuffer swaps the current buffer with a new buffer and returns the old buffer.
+// SwapBuffer swaps the current buffer with a new buffer and returns the old buffer even if the current buffer is empty.
 //
 // Note: The function will directly replace the old buffer with the new buffer without clearing the new buffer's elements.
 func (b *FastMpmc[T]) SwapBuffer(newBuffer *[]T) *[]T {
