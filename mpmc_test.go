@@ -418,7 +418,7 @@ func BenchmarkMPMC(b *testing.B) {
 	}
 
 	for _, bc := range benchCases {
-		b.Run("SimpleMQ_"+bc.name, func(b *testing.B) {
+		b.Run("Fast MPMC_"+bc.name, func(b *testing.B) {
 			benchmarkMPMCSimpleMQ(b, bc.batchSize, bc.producers, bc.consumers)
 		})
 		b.Run("Channel_"+bc.name, func(b *testing.B) {
