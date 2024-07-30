@@ -225,6 +225,165 @@ func TestPush(t *testing.T) {
 	}
 }
 
+func TestWaitSwapBuffer_BasicFunctionality(t *testing.T) {
+	queue := NewFastMpmc[int](10)
+	newBuffer := make([]int, 0, 10)
+
+	// Push some elements to the queue
+	queue.Push(1, 2, 3)
+
+	// Swap buffer and verify
+	oldBuffer := queue.WaitSwapBuffer(&newBuffer)
+	if len(*oldBuffer) != 3 {
+		t.Fatalf("expected 3 elements, got %d", len(*oldBuffer))
+	}
+	if (*oldBuffer)[0] != 1 || (*oldBuffer)[1] != 2 || (*oldBuffer)[2] != 3 {
+		t.Fatalf("unexpected buffer contents: %v", *oldBuffer)
+	}
+}
+
+func TestWaitSwapBuffer_BlockingBehavior(t *testing.T) {
+	queue := NewFastMpmc[int](10)
+	newBuffer := make([]int, 0, 10)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		// This should block until an element is pushed
+		queue.WaitSwapBuffer(&newBuffer)
+	}()
+
+	// Give the goroutine some time to block
+	time.Sleep(100 * time.Millisecond)
+
+	// Push an element to unblock the goroutine
+	queue.Push(1)
+
+	wg.Wait()
+}
+
+func TestWaitSwapBuffer_EmptyBuffer(t *testing.T) {
+	queue := NewFastMpmc[int](10)
+	newBuffer := make([]int, 0, 10)
+
+	// This should block until an element is pushed
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		queue.Push(1)
+	}()
+
+	oldBuffer := queue.WaitSwapBuffer(&newBuffer)
+	if len(*oldBuffer) != 1 {
+		t.Fatalf("expected 1 element, got %d", len(*oldBuffer))
+	}
+	if (*oldBuffer)[0] != 1 {
+		t.Fatalf("unexpected buffer contents: %v", *oldBuffer)
+	}
+}
+
+func TestWaitSwapBufferContext_Cancel(t *testing.T) {
+	queue := NewFastMpmc[int](10)
+	newBuffer := make([]int, 0, 10)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	oldBuffer, ok := queue.WaitSwapBufferContext(ctx, &newBuffer)
+	if ok {
+		t.Fatal("expected context to cancel, but it didn't")
+	}
+	if oldBuffer != nil {
+		t.Fatalf("expected nil buffer, got %v", oldBuffer)
+	}
+}
+
+func TestWaitSwapBufferConcurrent(t *testing.T) {
+	const (
+		pushGoRoutines  = 10
+		swapGoRoutines  = 5
+		itemsPerRoutine = 1000
+		bufferMinCap    = 100
+	)
+
+	queue := NewFastMpmc[int](bufferMinCap)
+	var wg sync.WaitGroup
+
+	// Start push goroutines
+	for i := 0; i < pushGoRoutines; i++ {
+		wg.Add(1)
+		go func(routineID int) {
+			defer wg.Done()
+			for j := 0; j < itemsPerRoutine; j++ {
+				queue.Push(routineID*itemsPerRoutine + j)
+			}
+		}(i)
+	}
+
+	// Start swap goroutines
+	receivedItems := make([]int, 0, pushGoRoutines*itemsPerRoutine)
+	var receivedMu sync.Mutex
+
+	ctx, cancle := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancle()
+	for i := 0; i < swapGoRoutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			newBuffer := queue.bufferPool.Get().(*[]int)
+			for {
+
+				swapped, ok := queue.WaitSwapBufferContext(ctx, newBuffer)
+				if !ok {
+					break
+				}
+				if len(*swapped) == 0 {
+					t.Errorf("Expected swapped buffer to contain items, got 0")
+					return
+				}
+
+				receivedMu.Lock()
+				receivedItems = append(receivedItems, *swapped...)
+				receivedMu.Unlock()
+
+				if len(receivedItems) >= pushGoRoutines*itemsPerRoutine {
+					cancle()
+					break
+				}
+				*swapped = (*swapped)[:0]
+				newBuffer = swapped
+			}
+		}()
+	}
+
+	// Wait for all goroutines to finish
+	wg.Wait()
+
+	// Give some time for the last swap operations to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify results
+	if len(receivedItems) != pushGoRoutines*itemsPerRoutine {
+		t.Errorf("Expected %d items, got %d", pushGoRoutines*itemsPerRoutine, len(receivedItems))
+	}
+
+	// Create a map to check for duplicates and missing items
+	itemMap := make(map[int]bool)
+	for _, item := range receivedItems {
+		if itemMap[item] {
+			t.Errorf("Duplicate item found: %d", item)
+		}
+		itemMap[item] = true
+	}
+
+	for i := 0; i < pushGoRoutines*itemsPerRoutine; i++ {
+		if !itemMap[i] {
+			t.Errorf("Missing item: %d", i)
+		}
+	}
+}
+
 func BenchmarkSPSC(b *testing.B) {
 	benchCases := []struct {
 		name      string
