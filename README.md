@@ -57,7 +57,7 @@ queue.RecycleBuffer(elements) // Recycles the buffer for reuse
 
 This benchmark compares the performance of the Fast MPMC queue implementation against Go's built-in channels for various data sizes.
 
-| Test Case               | Operations per Second | ns/op  | Allocations per Operation |
+| Test Case               | Iterations | ns/op  | Allocations per Operation |
 |-------------------------|-----------------------|--------|---------------------------|
 | Fast MPMC Small         | 40,664,594            | 28.50  | 0                         |
 | Channel Small           | 11,229,351            | 101.3  | 0                         |
