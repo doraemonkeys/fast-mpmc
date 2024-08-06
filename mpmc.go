@@ -109,6 +109,8 @@ func (b *FastMpmc[T]) swapWhenNotEmpty(newBuffer *[]T) *[]T {
 // WaitSwapBuffer waits for a signal indicating that the buffer is not empty,
 // then swaps the current buffer with the provided new buffer and returns the old buffer.
 // This method blocks until the buffer is not empty and the swap is performed.
+//
+// Note: The function will directly replace the old buffer with the new buffer without clearing the new buffer's elements.
 func (b *FastMpmc[T]) WaitSwapBuffer(newBuffer *[]T) *[]T {
 	for range b.popAllCondChan {
 		if elements := b.swapWhenNotEmpty(newBuffer); elements != nil {
