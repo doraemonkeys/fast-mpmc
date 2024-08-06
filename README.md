@@ -17,7 +17,7 @@ go get github.com/doraemonkeys/fast-mpmc
 ### Creating a Queue
 
 ```go
-queue := NewFastMpmc[int](8) // Creates a new queue with a minimum buffer capacity of 8
+queue := mpmc.NewFastMpmc[int](8) // Creates a new queue with a minimum buffer capacity of 8
 ```
 
 ### Pushing Elements
@@ -44,6 +44,12 @@ if ok {
 } else {
     // Handle timeout or cancellation
 }
+```
+
+### Or Swap the Buffer
+
+```go
+elements := queue.WaitSwapBuffer(buffer) // Waits for elements to be available and swaps the buffer
 ```
 
 ### Buffer Recycling
