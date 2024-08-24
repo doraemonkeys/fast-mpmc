@@ -2,6 +2,7 @@ package mpmc
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -395,8 +396,8 @@ func BenchmarkSPSC(b *testing.B) {
 	}
 
 	for _, bc := range benchCases {
-		b.Run("SimpleMQ_"+bc.name, func(b *testing.B) {
-			benchmarkSPSCSimpleMQ(b, bc.batchSize)
+		b.Run("Fast MPMC_"+bc.name, func(b *testing.B) {
+			benchmarkSPSCFastMPMC(b, bc.batchSize)
 		})
 		b.Run("Channel_"+bc.name, func(b *testing.B) {
 			benchmarkSPSCChannel(b, bc.batchSize)
@@ -404,32 +405,7 @@ func BenchmarkSPSC(b *testing.B) {
 	}
 }
 
-func BenchmarkMPMC(b *testing.B) {
-	benchCases := []struct {
-		name      string
-		batchSize int
-		producers int
-		consumers int
-	}{
-		{"Small", 1, 2, 2},
-		{"Medium", 100, 4, 4},
-		{"Large", 1000, 8, 8},
-		{"Huge", 10000, 16, 2},
-	}
-
-	for _, bc := range benchCases {
-		b.Run("Fast MPMC_"+bc.name, func(b *testing.B) {
-			benchmarkMPMCSimpleMQ(b, bc.batchSize, bc.producers, bc.consumers)
-		})
-		b.Run("Channel_"+bc.name, func(b *testing.B) {
-			benchmarkMPMCChannel(b, bc.batchSize, bc.producers, bc.consumers)
-		})
-	}
-}
-
-const benchmarkMqInitialSize = 20
-
-func benchmarkSPSCSimpleMQ(b *testing.B, _ int) {
+func benchmarkSPSCFastMPMC(b *testing.B, _ int) {
 	mq := NewFastMpmc[int](benchmarkMqInitialSize)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -465,6 +441,31 @@ func benchmarkSPSCChannel(b *testing.B, _ int) {
 		count++
 	}
 }
+
+func BenchmarkMPMC(b *testing.B) {
+	benchCases := []struct {
+		name      string
+		batchSize int
+		producers int
+		consumers int
+	}{
+		{"Small", 1, 2, 2},
+		{"Medium", 100, 4, 4},
+		{"Large", 1000, 8, 8},
+		{"Huge", 10000, 16, 2},
+	}
+
+	for _, bc := range benchCases {
+		b.Run("Fast MPMC_"+bc.name, func(b *testing.B) {
+			benchmarkMPMCSimpleMQ(b, bc.batchSize, bc.producers, bc.consumers)
+		})
+		b.Run("Channel_"+bc.name, func(b *testing.B) {
+			benchmarkMPMCChannel(b, bc.batchSize, bc.producers, bc.consumers)
+		})
+	}
+}
+
+const benchmarkMqInitialSize = 20
 
 func benchmarkMPMCSimpleMQ(b *testing.B, _, producers, consumers int) {
 	mq := NewFastMpmc[int](benchmarkMqInitialSize)
@@ -541,6 +542,152 @@ func benchmarkMPMCChannel(b *testing.B, _, producers, consumers int) {
 			defer wg.Done()
 			for j := 0; j < nums; j++ {
 				ch <- j
+			}
+		}(itemsPerProducer)
+	}
+
+	// Closer
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	// Consumers
+	consumedItems := make([]int, consumers)
+	var consumerWg sync.WaitGroup
+	for i := 0; i < consumers; i++ {
+		consumerWg.Add(1)
+		go func(id int) {
+			defer consumerWg.Done()
+			for range ch {
+				consumedItems[id]++
+			}
+		}(i)
+	}
+
+	consumerWg.Wait()
+
+	totalConsumed := 0
+	for _, count := range consumedItems {
+		totalConsumed += count
+	}
+	if totalConsumed != b.N {
+		b.Fatalf("Expected to consume %d items, but consumed %d", b.N, totalConsumed)
+	}
+}
+
+type TestItem struct {
+	ID   int64
+	Name string
+	Data [128]byte
+}
+
+func BenchmarkMPMC_BigStruct(b *testing.B) {
+	benchCases := []struct {
+		name      string
+		batchSize int
+		producers int
+		consumers int
+	}{
+		{"Small", 1, 2, 2},
+		{"Medium", 100, 4, 4},
+		{"Large", 1000, 8, 8},
+		{"Huge", 10000, 16, 2},
+	}
+
+	for _, bc := range benchCases {
+		b.Run("Fast MPMC_"+bc.name, func(b *testing.B) {
+			benchmarkMPMCSimpleMQ_BigStruct(b, bc.batchSize, bc.producers, bc.consumers)
+		})
+		b.Run("Channel_"+bc.name, func(b *testing.B) {
+			benchmarkMPMCChannel_BigStruct(b, bc.batchSize, bc.producers, bc.consumers)
+		})
+	}
+}
+
+func benchmarkMPMCSimpleMQ_BigStruct(b *testing.B, _, producers, consumers int) {
+	mq := NewFastMpmc[TestItem](benchmarkMqInitialSize)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	itemsPerProducer := b.N / producers
+
+	b.ResetTimer()
+
+	// Producers
+	for i := 0; i < producers; i++ {
+		wg.Add(1)
+		if i == producers-1 {
+			itemsPerProducer += b.N % producers
+		}
+		go func(nums int) {
+			defer wg.Done()
+			for j := 0; j < nums; j++ {
+				item := TestItem{
+					ID:   int64(j),
+					Name: fmt.Sprintf("Item %d", j),
+				}
+				mq.Push(item)
+			}
+		}(itemsPerProducer)
+	}
+
+	var wg2 sync.WaitGroup
+	// Consumers
+	consumedItems := make([]int, consumers)
+	for i := 0; i < consumers; i++ {
+		wg2.Add(1)
+		go func(id int) {
+			defer wg2.Done()
+			for {
+				items, ok := mq.WaitPopAllContext(ctx)
+				if !ok && mq.Len() == 0 {
+					return
+				}
+				if items != nil {
+					consumedItems[id] += len(*items)
+					mq.RecycleBuffer(items)
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	cancel() // Stop consumers
+	wg2.Wait()
+
+	totalConsumed := 0
+	for _, count := range consumedItems {
+		totalConsumed += count
+	}
+	if totalConsumed != b.N {
+		b.Fatalf("Expected to consume %d items, but consumed %d", b.N, totalConsumed)
+	}
+}
+
+func benchmarkMPMCChannel_BigStruct(b *testing.B, _, producers, consumers int) {
+	ch := make(chan TestItem, benchmarkMqInitialSize*2)
+
+	var wg sync.WaitGroup
+	itemsPerProducer := b.N / producers
+
+	b.ResetTimer()
+
+	// Producers
+	for i := 0; i < producers; i++ {
+		wg.Add(1)
+		if i == producers-1 {
+			itemsPerProducer += b.N % producers
+		}
+		go func(nums int) {
+			defer wg.Done()
+			for j := 0; j < nums; j++ {
+				item := TestItem{
+					ID:   int64(j),
+					Name: fmt.Sprintf("Item %d", j),
+				}
+				ch <- item
 			}
 		}(itemsPerProducer)
 	}
