@@ -498,14 +498,17 @@ func benchmarkMPMCSimpleMQ(b *testing.B, _, producers, consumers int) {
 		wg2.Add(1)
 		go func(id int) {
 			defer wg2.Done()
+			var temp = make([]int, 0, benchmarkMqInitialSize)
+			buffer := &temp
 			for {
-				items, ok := mq.WaitPopAllContext(ctx)
-				if !ok && mq.Len() == 0 {
+				*buffer = (*buffer)[:0]
+				old, ok := mq.WaitSwapBufferContext(ctx, buffer)
+				if !ok && mq.LenNoLock() == 0 {
 					return
 				}
-				if items != nil {
-					consumedItems[id] += len(*items)
-					mq.RecycleBuffer(items)
+				if old != nil {
+					consumedItems[id] += len(*old)
+					buffer = old
 				}
 			}
 		}(i)
@@ -640,14 +643,17 @@ func benchmarkMPMCSimpleMQ_BigStruct(b *testing.B, _, producers, consumers int) 
 		wg2.Add(1)
 		go func(id int) {
 			defer wg2.Done()
+			var temp = make([]TestItem, 0, benchmarkMqInitialSize)
+			buffer := &temp
 			for {
-				items, ok := mq.WaitPopAllContext(ctx)
-				if !ok && mq.Len() == 0 {
+				*buffer = (*buffer)[:0]
+				old, ok := mq.WaitSwapBufferContext(ctx, buffer)
+				if !ok && mq.LenNoLock() == 0 {
 					return
 				}
-				if items != nil {
-					consumedItems[id] += len(*items)
-					mq.RecycleBuffer(items)
+				if old != nil {
+					consumedItems[id] += len(*old)
+					buffer = old
 				}
 			}
 		}(i)
