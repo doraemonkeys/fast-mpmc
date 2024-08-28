@@ -494,6 +494,10 @@ func benchmarkMPMCSimpleMQ(b *testing.B, _, producers, consumers int) {
 	var wg2 sync.WaitGroup
 	// Consumers
 	consumedItems := make([]int, consumers)
+	consumedIDs := make([]map[int64]bool, consumers)
+	for i := 0; i < consumers; i++ {
+		consumedIDs[i] = make(map[int64]bool)
+	}
 	for i := 0; i < consumers; i++ {
 		wg2.Add(1)
 		go func(id int) {
@@ -508,6 +512,9 @@ func benchmarkMPMCSimpleMQ(b *testing.B, _, producers, consumers int) {
 				}
 				if old != nil {
 					consumedItems[id] += len(*old)
+					for i := 0; i < len(*old); i++ {
+						consumedIDs[id][int64((*old)[i])] = true
+					}
 					buffer = old
 				}
 			}
@@ -523,7 +530,7 @@ func benchmarkMPMCSimpleMQ(b *testing.B, _, producers, consumers int) {
 		totalConsumed += count
 	}
 	if totalConsumed != b.N {
-		b.Fatalf("Expected to consume %d items, but consumed %d", b.N, totalConsumed)
+		b.Fatalf("Expected to consume %d items, but consumed %d, unique items: %v", b.N, totalConsumed, consumedIDs)
 	}
 }
 
@@ -557,13 +564,18 @@ func benchmarkMPMCChannel(b *testing.B, _, producers, consumers int) {
 
 	// Consumers
 	consumedItems := make([]int, consumers)
+	consumedIDs := make([]map[int64]bool, consumers)
+	for i := 0; i < consumers; i++ {
+		consumedIDs[i] = make(map[int64]bool)
+	}
 	var consumerWg sync.WaitGroup
 	for i := 0; i < consumers; i++ {
 		consumerWg.Add(1)
 		go func(id int) {
 			defer consumerWg.Done()
-			for range ch {
+			for item := range ch {
 				consumedItems[id]++
+				consumedIDs[id][int64(item)] = true
 			}
 		}(i)
 	}
@@ -575,7 +587,7 @@ func benchmarkMPMCChannel(b *testing.B, _, producers, consumers int) {
 		totalConsumed += count
 	}
 	if totalConsumed != b.N {
-		b.Fatalf("Expected to consume %d items, but consumed %d", b.N, totalConsumed)
+		b.Fatalf("Expected to consume %d items, but consumed %d, unique items: %v", b.N, totalConsumed, consumedIDs)
 	}
 }
 
@@ -639,6 +651,10 @@ func benchmarkMPMCSimpleMQ_BigStruct(b *testing.B, _, producers, consumers int) 
 	var wg2 sync.WaitGroup
 	// Consumers
 	consumedItems := make([]int, consumers)
+	consumedIDs := make([]map[int64]bool, consumers)
+	for i := 0; i < consumers; i++ {
+		consumedIDs[i] = make(map[int64]bool)
+	}
 	for i := 0; i < consumers; i++ {
 		wg2.Add(1)
 		go func(id int) {
@@ -653,6 +669,9 @@ func benchmarkMPMCSimpleMQ_BigStruct(b *testing.B, _, producers, consumers int) 
 				}
 				if old != nil {
 					consumedItems[id] += len(*old)
+					for i := 0; i < len(*old); i++ {
+						consumedIDs[id][(*old)[i].ID] = true
+					}
 					buffer = old
 				}
 			}
@@ -668,7 +687,7 @@ func benchmarkMPMCSimpleMQ_BigStruct(b *testing.B, _, producers, consumers int) 
 		totalConsumed += count
 	}
 	if totalConsumed != b.N {
-		b.Fatalf("Expected to consume %d items, but consumed %d", b.N, totalConsumed)
+		b.Fatalf("Expected to consume %d items, but consumed %d, unique items: %v", b.N, totalConsumed, consumedIDs)
 	}
 }
 
@@ -706,13 +725,18 @@ func benchmarkMPMCChannel_BigStruct(b *testing.B, _, producers, consumers int) {
 
 	// Consumers
 	consumedItems := make([]int, consumers)
+	consumedIDs := make([]map[int64]bool, consumers)
+	for i := 0; i < consumers; i++ {
+		consumedIDs[i] = make(map[int64]bool)
+	}
 	var consumerWg sync.WaitGroup
 	for i := 0; i < consumers; i++ {
 		consumerWg.Add(1)
 		go func(id int) {
 			defer consumerWg.Done()
-			for range ch {
+			for item := range ch {
 				consumedItems[id]++
+				consumedIDs[id][item.ID] = true
 			}
 		}(i)
 	}
@@ -724,6 +748,245 @@ func benchmarkMPMCChannel_BigStruct(b *testing.B, _, producers, consumers int) {
 		totalConsumed += count
 	}
 	if totalConsumed != b.N {
-		b.Fatalf("Expected to consume %d items, but consumed %d", b.N, totalConsumed)
+		b.Fatalf("Expected to consume %d items, but consumed %d, unique items: %v", b.N, totalConsumed, consumedIDs)
+	}
+}
+
+func BenchmarkMPSC(b *testing.B) {
+	benchCases := []struct {
+		name      string
+		batchSize int
+		producers int
+	}{
+		{"Small", 1, 2},
+		{"Medium", 100, 4},
+		{"Large", 1000, 8},
+		{"Huge", 10000, 16},
+	}
+
+	for _, bc := range benchCases {
+		b.Run("Fast MPSC_"+bc.name, func(b *testing.B) {
+			benchmarkMPSCSimpleMQ(b, bc.batchSize, bc.producers)
+		})
+		b.Run("Channel_"+bc.name, func(b *testing.B) {
+			benchmarkMPSCChannel(b, bc.batchSize, bc.producers)
+		})
+	}
+}
+
+func benchmarkMPSCSimpleMQ(b *testing.B, _, producers int) {
+	mq := NewFastMpmc[int](benchmarkMqInitialSize)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	itemsPerProducer := b.N / producers
+
+	b.ResetTimer()
+
+	// Producers
+	for i := 0; i < producers; i++ {
+		wg.Add(1)
+		if i == producers-1 {
+			itemsPerProducer += b.N % producers
+		}
+		go func(nums int) {
+			defer wg.Done()
+			for j := 0; j < nums; j++ {
+				mq.Push(j)
+			}
+		}(itemsPerProducer)
+	}
+
+	// Single Consumer
+	consumed := 0
+	itemIDs := make(map[int64]bool)
+	go func() {
+		wg.Wait()
+		cancel() // Stop consumer when all producers are done
+	}()
+
+	var temp = make([]int, 0, benchmarkMqInitialSize)
+	buffer := &temp
+	for {
+		*buffer = (*buffer)[:0]
+		old, ok := mq.WaitSwapBufferContext(ctx, buffer)
+		if !ok && mq.LenNoLock() == 0 {
+			break
+		}
+		if old != nil {
+			consumed += len(*old)
+			for i := 0; i < len(*old); i++ {
+				itemIDs[int64((*old)[i])] = true
+			}
+			buffer = old
+		}
+	}
+
+	if consumed != b.N {
+		b.Fatalf("Expected to consume %d items, but consumed %d, unique items: %d", b.N, consumed, len(itemIDs))
+	}
+}
+
+func benchmarkMPSCChannel(b *testing.B, _, producers int) {
+	ch := make(chan int, benchmarkMqInitialSize*2)
+
+	var wg sync.WaitGroup
+	itemsPerProducer := b.N / producers
+
+	b.ResetTimer()
+
+	// Producers
+	for i := 0; i < producers; i++ {
+		wg.Add(1)
+		if i == producers-1 {
+			itemsPerProducer += b.N % producers
+		}
+		go func(nums int) {
+			defer wg.Done()
+			for j := 0; j < nums; j++ {
+				ch <- j
+			}
+		}(itemsPerProducer)
+	}
+
+	// Closer
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	// Single Consumer
+	consumed := 0
+	itemIDs := make(map[int64]bool)
+	for item := range ch {
+		consumed++
+		itemIDs[int64(item)] = true
+	}
+
+	if consumed != b.N {
+		b.Fatalf("Expected to consume %d items, but consumed %d, unique items: %d", b.N, consumed, len(itemIDs))
+	}
+}
+func BenchmarkMPSC_BigStruct(b *testing.B) {
+	benchCases := []struct {
+		name      string
+		batchSize int
+		producers int
+	}{
+		{"Small", 1, 2},
+		{"Medium", 100, 4},
+		{"Large", 1000, 8},
+		{"Huge", 10000, 16},
+	}
+
+	for _, bc := range benchCases {
+		b.Run("Fast MPSC_"+bc.name, func(b *testing.B) {
+			benchmarkMPSCSimpleMQ_BigStruct(b, bc.batchSize, bc.producers)
+		})
+		b.Run("Channel_"+bc.name, func(b *testing.B) {
+			benchmarkMPSCChannel_BigStruct(b, bc.batchSize, bc.producers)
+		})
+	}
+}
+
+func benchmarkMPSCSimpleMQ_BigStruct(b *testing.B, _, producers int) {
+	mq := NewFastMpmc[TestItem](benchmarkMqInitialSize)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	itemsPerProducer := b.N / producers
+
+	b.ResetTimer()
+
+	// Producers
+	for i := 0; i < producers; i++ {
+		wg.Add(1)
+		if i == producers-1 {
+			itemsPerProducer += b.N % producers
+		}
+		go func(nums int) {
+			defer wg.Done()
+			for j := 0; j < nums; j++ {
+				mq.Push(TestItem{
+					ID:   int64(j),
+					Name: fmt.Sprintf("Item %d", j),
+				})
+			}
+		}(itemsPerProducer)
+	}
+
+	// Single Consumer
+	consumed := 0
+	itemIDs := make(map[int64]bool)
+	go func() {
+		wg.Wait()
+		cancel() // Stop consumer when all producers are done
+	}()
+
+	var temp = make([]TestItem, 0, benchmarkMqInitialSize)
+	buffer := &temp
+	for {
+		*buffer = (*buffer)[:0]
+		old, ok := mq.WaitSwapBufferContext(ctx, buffer)
+		if !ok && mq.LenNoLock() == 0 {
+			break
+		}
+		if old != nil {
+			consumed += len(*old)
+			for i := 0; i < len(*old); i++ {
+				itemIDs[(*old)[i].ID] = true
+			}
+			buffer = old
+		}
+	}
+
+	if consumed != b.N {
+		b.Fatalf("Expected to consume %d items, but consumed %d, unique items: %d", b.N, consumed, len(itemIDs))
+	}
+}
+
+func benchmarkMPSCChannel_BigStruct(b *testing.B, _, producers int) {
+	ch := make(chan TestItem, benchmarkMqInitialSize*2)
+
+	var wg sync.WaitGroup
+	itemsPerProducer := b.N / producers
+
+	b.ResetTimer()
+
+	// Producers
+	for i := 0; i < producers; i++ {
+		wg.Add(1)
+		if i == producers-1 {
+			itemsPerProducer += b.N % producers
+		}
+		go func(nums int) {
+			defer wg.Done()
+			for j := 0; j < nums; j++ {
+				ch <- TestItem{
+					ID:   int64(j),
+					Name: fmt.Sprintf("Item %d", j),
+				}
+			}
+		}(itemsPerProducer)
+	}
+
+	// Closer
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	// Single Consumer
+	consumed := 0
+	itemIDs := make(map[int64]bool)
+	for item := range ch {
+		consumed++
+		itemIDs[item.ID] = true
+	}
+
+	if consumed != b.N {
+		b.Fatalf("Expected to consume %d items, but consumed %d, unique items: %d", b.N, consumed, len(itemIDs))
 	}
 }
