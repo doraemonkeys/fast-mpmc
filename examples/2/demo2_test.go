@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func main() {
+func Example() {
 	// Create a new Fast-MPMC queue with a minimum buffer capacity of 10
 	queue := mpmc.NewFastMpmc[int](10)
 
@@ -16,7 +16,7 @@ func main() {
 
 	// Pop all elements from the queue
 	elements := queue.WaitPopAll()
-	fmt.Println(*elements) // Output: [1 2 3]
+	fmt.Println(*elements) // [1 2 3]
 
 	// Recycle the buffer
 	queue.RecycleBuffer(elements)
@@ -30,11 +30,15 @@ func main() {
 
 	elements, ok := queue.WaitPopAllContext(ctx)
 	if ok {
-		fmt.Println(*elements) // Output: [4 5 6]
+		fmt.Println(*elements) // [4 5 6]
 	} else {
 		fmt.Println("Failed to pop elements within the timeout")
 	}
 
 	// Recycle the buffer
 	queue.RecycleBuffer(elements)
+
+	// Output:
+	// [1 2 3]
+	// [4 5 6]
 }

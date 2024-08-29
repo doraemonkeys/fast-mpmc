@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func main() {
+func Example() {
 	// Create a FastMpmc queue with a minimum capacity of 10
 	queue := mpmc.NewFastMpmc[int](10)
 
