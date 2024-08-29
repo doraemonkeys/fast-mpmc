@@ -1,5 +1,5 @@
 # fast-mpmc
-[![Go Reference](https://pkg.go.dev/badge/github.com/doraemonkeys/fast-mpmc.svg)](https://pkg.go.dev/github.com/doraemonkeys/fast-mpmc) [![Go Report Card](https://goreportcard.com/badge/github.com/doraemonkeys/fast-mpmc)](https://goreportcard.com/report/github.com/doraemonkeys/fast-mpmc)
+[![Go Reference](https://pkg.go.dev/badge/github.com/doraemonkeys/fast-mpmc.svg)](https://pkg.go.dev/github.com/doraemonkeys/fast-mpmc) [![Go Report Card](https://goreportcard.com/badge/github.com/doraemonkeys/fast-mpmc)](https://goreportcard.com/report/github.com/doraemonkeys/fast-mpmc) [![Coverage Status](https://coveralls.io/repos/github/doraemonkeys/fast-mpmc/badge.svg)](https://coveralls.io/github/doraemonkeys/fast-mpmc)
 
 
 This repository contains an implementation of a high-performance Multi-Producer Multi-Consumer (MPMC) queue in Go, named `FastMpmc`. This queue is designed for scenarios where multiple goroutines need to push and pop elements concurrently with minimal contention and high throughput. The implementation leverages the mechanism of buffer swapping to effectively reduce memory allocation and lock contention.
