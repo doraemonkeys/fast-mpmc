@@ -6,7 +6,723 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"math/rand"
 )
+
+func TestFastMpmc_SwapBuffer(t *testing.T) {
+	tests := []struct {
+		name           string
+		initialBuffer  []int
+		newBuffer      []int
+		expectedRet    []int
+		expectedSignal bool
+	}{
+		{
+			name:           "Empty buffer to non-empty buffer",
+			initialBuffer:  []int{},
+			newBuffer:      []int{1, 2, 3},
+			expectedRet:    []int{},
+			expectedSignal: true,
+		},
+		{
+			name:           "Non-empty buffer to empty buffer",
+			initialBuffer:  []int{1, 2, 3},
+			newBuffer:      []int{},
+			expectedRet:    []int{1, 2, 3},
+			expectedSignal: false,
+		},
+		{
+			name:           "Non-empty buffer to non-empty buffer",
+			initialBuffer:  []int{1, 2, 3},
+			newBuffer:      []int{4, 5, 6},
+			expectedRet:    []int{1, 2, 3},
+			expectedSignal: false,
+		},
+		{
+			name:           "Empty buffer to empty buffer",
+			initialBuffer:  []int{},
+			newBuffer:      []int{},
+			expectedRet:    []int{},
+			expectedSignal: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mpmc := NewFastMpmc[int](5)
+
+			// Set initial buffer
+			mpmc.buffer = &tt.initialBuffer
+
+			// Prepare new buffer
+			newBuffer := tt.newBuffer
+
+			// Call SwapBuffer
+			ret := mpmc.SwapBuffer(&newBuffer)
+
+			// Check returned buffer
+			if !sliceEqual(*ret, tt.expectedRet) {
+				t.Errorf("SwapBuffer() returned %v, want %v", *ret, tt.expectedRet)
+			}
+
+			// Check if the new buffer is now in place
+			if !sliceEqual(*mpmc.buffer, tt.newBuffer) {
+				t.Errorf("After SwapBuffer(), buffer is %v, want %v", *mpmc.buffer, tt.newBuffer)
+			}
+
+			// Check if signal was sent when expected
+			if tt.expectedSignal {
+				select {
+				case <-mpmc.popAllCondChan:
+					// Signal was sent as expected
+				case <-time.After(time.Millisecond * 10):
+					t.Error("Expected signal, but none received")
+				}
+			} else {
+				select {
+				case <-mpmc.popAllCondChan:
+					t.Error("Unexpected signal received")
+				case <-time.After(time.Millisecond * 10):
+					// No signal, as expected
+				}
+			}
+		})
+	}
+}
+
+// Helper function to compare slices
+func sliceEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestFastMpmc_PushSlice(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func() *FastMpmc[int]
+		input    []int
+		expected []int
+	}{
+		{
+			name: "Push to empty queue",
+			setup: func() *FastMpmc[int] {
+				return NewFastMpmc[int](5)
+			},
+			input:    []int{1, 2, 3},
+			expected: []int{1, 2, 3},
+		},
+		{
+			name: "Push to non-empty queue",
+			setup: func() *FastMpmc[int] {
+				q := NewFastMpmc[int](5)
+				q.Push(1, 2)
+				return q
+			},
+			input:    []int{3, 4, 5},
+			expected: []int{1, 2, 3, 4, 5},
+		},
+		{
+			name: "Push empty slice",
+			setup: func() *FastMpmc[int] {
+				return NewFastMpmc[int](5)
+			},
+			input:    []int{},
+			expected: []int{},
+		},
+		{
+			name: "Push slice larger than initial capacity",
+			setup: func() *FastMpmc[int] {
+				return NewFastMpmc[int](3)
+			},
+			input:    []int{1, 2, 3, 4, 5},
+			expected: []int{1, 2, 3, 4, 5},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := tt.setup()
+			q.PushSlice(tt.input)
+
+			// Use WaitSwapBuffer to get the contents of the queue
+			result := q.SwapBuffer(&[]int{})
+			equaqlSlice(t, tt.expected, *result)
+
+			if q.Len() != 0 {
+				t.Fatalf("Expected queue to be empty, but it has %d elements", q.Len())
+			}
+		})
+	}
+}
+
+func TestFastMpmc_PushSlice_Concurrency(t *testing.T) {
+	q := NewFastMpmc[int](100)
+	numGoroutines := 10
+	itemsPerGoroutine := 1000
+
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func(start int) {
+			defer wg.Done()
+			slice := make([]int, itemsPerGoroutine)
+			for j := 0; j < itemsPerGoroutine; j++ {
+				slice[j] = start + j
+			}
+			q.PushSlice(slice)
+		}(i * itemsPerGoroutine)
+	}
+
+	wg.Wait()
+
+	// Use WaitSwapBuffer to get the contents of the queue
+	result := q.WaitSwapBuffer(&[]int{})
+
+	equal(t, numGoroutines*itemsPerGoroutine, len(*result))
+
+	// Check if all numbers are present
+	countMap := make(map[int]bool)
+	for _, num := range *result {
+		countMap[num] = true
+	}
+	equal(t, numGoroutines*itemsPerGoroutine, len(countMap))
+}
+
+func equaqlSlice[T comparable](t *testing.T, a, b []T) {
+	if len(a) != len(b) {
+		t.Fatalf("Expected %v, got %v", a, b)
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("Expected %v, got %v", a, b)
+		}
+	}
+}
+
+func equal[T comparable](t *testing.T, a, b T) {
+	if a != b {
+		t.Fatalf("Expected %v, got %v", a, b)
+	}
+}
+
+func TestWaitPopAll(t *testing.T) {
+	t.Run("Non-empty queue", func(t *testing.T) {
+		q := NewFastMpmc[int](5)
+		q.Push(1, 2, 3)
+
+		result := q.WaitPopAll()
+		if len(*result) != 3 || (*result)[0] != 1 || (*result)[1] != 2 || (*result)[2] != 3 {
+			t.Errorf("Expected [1, 2, 3], got %v", *result)
+		}
+	})
+
+	t.Run("Initially empty, then filled queue", func(t *testing.T) {
+		q := NewFastMpmc[int](5)
+
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			q.Push(4, 5, 6)
+		}()
+
+		result := q.WaitPopAll()
+		if len(*result) != 3 || (*result)[0] != 4 || (*result)[1] != 5 || (*result)[2] != 6 {
+			t.Errorf("Expected [4, 5, 6], got %v", *result)
+		}
+	})
+}
+
+func TestWaitPopAllContext(t *testing.T) {
+	t.Run("Non-empty queue", func(t *testing.T) {
+		q := NewFastMpmc[int](5)
+		q.Push(1, 2, 3)
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		result, ok := q.WaitPopAllContext(ctx)
+		if !ok {
+			t.Error("Expected success, got failure")
+		}
+		if len(*result) != 3 || (*result)[0] != 1 || (*result)[1] != 2 || (*result)[2] != 3 {
+			t.Errorf("Expected [1, 2, 3], got %v", *result)
+		}
+	})
+
+	t.Run("Context timeout", func(t *testing.T) {
+		q := NewFastMpmc[int](5)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		result, ok := q.WaitPopAllContext(ctx)
+		if ok || result != nil {
+			t.Errorf("Expected failure and nil result, got success or non-nil result")
+		}
+	})
+
+	t.Run("Initially empty, then filled queue", func(t *testing.T) {
+		q := NewFastMpmc[int](5)
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			q.Push(4, 5, 6)
+		}()
+
+		result, ok := q.WaitPopAllContext(ctx)
+		if !ok {
+			t.Error("Expected success, got failure")
+		}
+		if len(*result) != 3 || (*result)[0] != 4 || (*result)[1] != 5 || (*result)[2] != 6 {
+			t.Errorf("Expected [4, 5, 6], got %v", *result)
+		}
+	})
+}
+
+func TestTryPopAll(t *testing.T) {
+	t.Run("Non-empty queue", func(t *testing.T) {
+		q := NewFastMpmc[int](5)
+		q.Push(1, 2, 3)
+
+		result, ok := q.TryPopAll()
+		if !ok {
+			t.Error("Expected success, got failure")
+		}
+		if len(*result) != 3 || (*result)[0] != 1 || (*result)[1] != 2 || (*result)[2] != 3 {
+			t.Errorf("Expected [1, 2, 3], got %v", *result)
+		}
+	})
+
+	t.Run("Empty queue", func(t *testing.T) {
+		q := NewFastMpmc[int](5)
+
+		result, ok := q.TryPopAll()
+		if ok || result != nil {
+			t.Errorf("Expected failure and nil result, got success or non-nil result")
+		}
+	})
+}
+
+func TestFastMpmc_Len(t *testing.T) {
+	q := NewFastMpmc[int](5)
+
+	if q.Len() != 0 {
+		t.Errorf("Expected length 0, got %d", q.Len())
+	}
+
+	q.Push(1, 2, 3)
+	if q.Len() != 3 {
+		t.Errorf("Expected length 3, got %d", q.Len())
+	}
+}
+
+func TestFastMpmc_Cap(t *testing.T) {
+	q := NewFastMpmc[int](5)
+
+	if q.Cap() != 5 {
+		t.Errorf("Expected capacity 5, got %d", q.Cap())
+	}
+
+	q.Push(1, 2, 3, 4, 5, 6)
+	if q.Cap() <= 5 {
+		t.Errorf("Expected capacity > 5, got %d", q.Cap())
+	}
+}
+
+func TestFastMpmc_IsEmpty(t *testing.T) {
+	q := NewFastMpmc[int](5)
+
+	if !q.IsEmpty() {
+		t.Error("Expected queue to be empty")
+	}
+
+	q.Push(1)
+	if q.IsEmpty() {
+		t.Error("Expected queue to be non-empty")
+	}
+
+	_, _ = q.TryPopAll()
+	if !q.IsEmpty() {
+		t.Error("Expected queue to be empty after popping all elements")
+	}
+}
+
+func TestFastMpmc_LenNoLock(t *testing.T) {
+	q := NewFastMpmc[int](5)
+
+	q.Push(1, 2, 3)
+	q.bufferMu.Lock()
+	defer q.bufferMu.Unlock()
+
+	if q.LenNoLock() != 3 {
+		t.Errorf("Expected length 3, got %d", q.LenNoLock())
+	}
+}
+
+func TestFastMpmc_CapNoLock(t *testing.T) {
+	q := NewFastMpmc[int](5)
+
+	q.bufferMu.Lock()
+	defer q.bufferMu.Unlock()
+
+	if q.CapNoLock() != 5 {
+		t.Errorf("Expected capacity 5, got %d", q.CapNoLock())
+	}
+}
+
+func TestFastMpmc_IsEmptyNoLock(t *testing.T) {
+	q := NewFastMpmc[int](5)
+
+	q.bufferMu.Lock()
+	defer q.bufferMu.Unlock()
+
+	if !q.IsEmptyNoLock() {
+		t.Error("Expected queue to be empty")
+	}
+
+	*q.buffer = append(*q.buffer, 1)
+	if q.IsEmptyNoLock() {
+		t.Error("Expected queue to be non-empty")
+	}
+}
+
+func TestConcurrentSwapAndWaitSwap(t *testing.T) {
+	const (
+		numWorkers     = 10
+		numOperations  = 1000
+		bufferCapacity = 100
+	)
+
+	queue := NewFastMpmc[int](bufferCapacity)
+	var wg sync.WaitGroup
+
+	// 启动多个 goroutine 进行并发操作
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < numOperations; j++ {
+				switch rand.Intn(3) {
+				case 0:
+					// Push 操作
+					queue.Push(rand.Int())
+				case 1:
+					// SwapBuffer 操作
+					newBuffer := make([]int, 0, bufferCapacity)
+					oldBuffer := queue.SwapBuffer(&newBuffer)
+					t.Logf("SwapBuffer: old buffer len %d, new buffer len %d", len(*oldBuffer), len(newBuffer))
+				case 2:
+					// WaitSwapBuffer 操作
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+					defer cancel()
+					newBuffer := make([]int, 0, bufferCapacity)
+					oldBuffer, ok := queue.WaitSwapBufferContext(ctx, &newBuffer)
+					if ok {
+						t.Logf("WaitSwapBuffer: old buffer len %d, new buffer len %d", len(*oldBuffer), len(newBuffer))
+					} else {
+						t.Log("WaitSwapBuffer: timeout")
+					}
+				}
+			}
+		}()
+	}
+
+	// 等待所有 goroutine 完成
+	wg.Wait()
+}
+
+func TestEdgeCaseSwapAndWaitSwap(t *testing.T) {
+	const bufferCapacity = 100
+	queue := NewFastMpmc[int](bufferCapacity)
+
+	// 准备一个非空缓冲区
+	queue.Push(1)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// 同时调用 SwapBuffer 和 WaitSwapBuffer
+	go func() {
+		defer wg.Done()
+		newBuffer := make([]int, 0, bufferCapacity)
+		oldBuffer := queue.SwapBuffer(&newBuffer)
+		t.Logf("SwapBuffer: old buffer len %d, new buffer len %d", len(*oldBuffer), len(newBuffer))
+	}()
+
+	go func() {
+		defer wg.Done()
+		newBuffer := make([]int, 0, bufferCapacity)
+		oldBuffer := queue.WaitSwapBuffer(&newBuffer)
+		t.Logf("WaitSwapBuffer: old buffer len %d, new buffer len %d", len(*oldBuffer), len(newBuffer))
+	}()
+
+	wg.Wait()
+}
+
+func TestConcurrentSwapAndWaitSwap2(t *testing.T) {
+	const (
+		iterations = 2000
+		bufSize    = 10
+	)
+
+	queue := NewFastMpmc[int](bufSize)
+	var wg sync.WaitGroup
+
+	startCh := make(chan struct{})
+
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			newBuf := make([]int, 0, bufSize)
+			<-startCh
+			for j := 0; j < iterations; j++ {
+				oldBuf := queue.SwapBuffer(&newBuf)
+				if len(*oldBuf) > 0 {
+					newBuf = (*oldBuf)[:0]
+				}
+			}
+		}()
+	}
+
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			newBuf := make([]int, 0, bufSize)
+			<-startCh
+			for j := 0; j < iterations; j++ {
+				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+				oldBuf, ok := queue.WaitSwapBufferContext(ctx, &newBuf)
+				cancel()
+				if ok && len(*oldBuf) > 0 {
+					newBuf = (*oldBuf)[:0]
+				}
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-startCh
+		for i := 0; i < iterations*10; i++ {
+			queue.Push(i)
+			time.Sleep(time.Microsecond)
+		}
+	}()
+
+	close(startCh)
+
+	wg.Wait()
+
+	t.Log("Test completed without deadlocks or panics")
+}
+
+func TestTryPopAll2(t *testing.T) {
+	t.Run("Race condition: non-empty to empty buffer", func(t *testing.T) {
+		q := NewFastMpmc[int](10)
+		q.Push(1, 2, 3)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			time.Sleep(10 * time.Millisecond) // Delay to ensure SwapBuffer runs first
+			result, ok := q.TryPopAll()
+			if !ok && result != nil {
+				t.Error("Expected TryPopAll to fail")
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			newBuffer := make([]int, 0, 10)
+			q.SwapBuffer(&newBuffer)
+		}()
+
+		wg.Wait()
+
+		// Verify the queue is now empty
+		result, ok := q.TryPopAll()
+		if ok {
+			t.Error("Expected TryPopAll to fail")
+		}
+		if result != nil {
+			t.Error("Expected nil result")
+		}
+	})
+}
+
+func TestTryPopAllConcurrent(t *testing.T) {
+	q := NewFastMpmc[int](10)
+	var wg sync.WaitGroup
+	iterations := 3000
+
+	// 测试正常情况
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			q.Push(i)
+			time.Sleep(time.Microsecond)
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			elements, ok := q.TryPopAll()
+			if ok {
+				q.RecycleBuffer(elements)
+			}
+			time.Sleep(time.Microsecond)
+		}
+	}()
+
+	// 测试边缘情况: SwapBuffer 与 TryPopAll 并发
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			newBuffer := make([]int, 0, q.bufMinCap)
+			oldBuffer := q.SwapBuffer(&newBuffer)
+			q.RecycleBuffer(oldBuffer)
+			time.Sleep(time.Microsecond)
+		}
+	}()
+
+	// 额外的 goroutine 来增加并发性和竞争条件的可能性
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if rand.Float32() < 0.5 {
+				q.Push(i)
+			} else {
+				elements, ok := q.TryPopAll()
+				if ok {
+					q.RecycleBuffer(elements)
+				}
+			}
+			time.Sleep(time.Microsecond)
+		}
+	}()
+
+	// 专门测试 case <-b.popAllCondChan return nil, false 的情况
+	nilFalseCount := 0
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations*10; i++ { // 增加迭代次数以提高捕获小概率事件的机会
+			select {
+			case <-q.popAllCondChan:
+				elements, ok := q.TryPopAll()
+				if !ok && elements == nil {
+					nilFalseCount++
+				}
+				if ok && elements != nil {
+					q.RecycleBuffer(elements)
+				}
+			default:
+				// Do nothing
+			}
+			time.Sleep(time.Microsecond)
+		}
+	}()
+
+	wg.Wait()
+
+	if nilFalseCount == 0 {
+		t.Errorf("Failed to capture the case where TryPopAll returns (nil, false) after receiving a signal")
+	} else {
+		t.Logf("Captured %d instances of TryPopAll returning (nil, false) after receiving a signal", nilFalseCount)
+	}
+}
+
+func TestWaitPopAll3(t *testing.T) {
+
+	t.Run("Panic case", func(t *testing.T) {
+		q := NewFastMpmc[int](5)
+
+		// 使用一个 channel 来同步 goroutine
+		done := make(chan bool)
+
+		go func() {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("The code did not panic")
+				}
+				done <- true
+			}()
+
+			// 关闭 channel 以触发 panic
+			close(q.popAllCondChan)
+			q.WaitPopAll()
+		}()
+
+		select {
+		case <-done:
+			// 测试通过
+		case <-time.After(time.Second):
+			t.Fatal("Test timed out")
+		}
+	})
+}
+
+func TestWaitSwapBuffer(t *testing.T) {
+	t.Run("Normal case", func(t *testing.T) {
+		q := NewFastMpmc[int](5)
+		q.Push(1, 2, 3)
+
+		newBuffer := make([]int, 0, 5)
+		result := q.WaitSwapBuffer(&newBuffer)
+
+		if len(*result) != 3 || (*result)[0] != 1 || (*result)[2] != 3 {
+			t.Errorf("Unexpected result: %v", *result)
+		}
+	})
+
+	t.Run("Panic case", func(t *testing.T) {
+		q := NewFastMpmc[int](5)
+
+		done := make(chan bool)
+
+		go func() {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("The code did not panic")
+				}
+				done <- true
+			}()
+
+			newBuffer := make([]int, 0, 5)
+			// 关闭 channel 以触发 panic
+			close(q.popAllCondChan)
+			q.WaitSwapBuffer(&newBuffer)
+		}()
+
+		select {
+		case <-done:
+			// 测试通过
+		case <-time.After(time.Second):
+			t.Fatal("Test timed out")
+		}
+	})
+}
 
 func TestNewFastMpmc(t *testing.T) {
 	mq := NewFastMpmc[int](10)
@@ -151,7 +867,7 @@ func TestSimpleMQ(t *testing.T) {
 					for _, value := range *buffer {
 						t.Logf("Consumer %d received: %d", consumerID, value)
 					}
-					mq.bufferPool.Put(buffer)
+					mq.RecycleBuffer(buffer)
 				case <-time.After(1 * time.Second):
 					return
 				}
