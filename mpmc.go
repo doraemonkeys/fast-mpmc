@@ -210,31 +210,13 @@ func (b *FastMpmc[T]) TryPopAll() (*[]T, bool) {
 }
 
 func (b *FastMpmc[T]) Len() int {
-	b.bufferMu.Lock()
-	defer b.bufferMu.Unlock()
 	return len(*b.buffer)
 }
 
 func (b *FastMpmc[T]) Cap() int {
-	b.bufferMu.Lock()
-	defer b.bufferMu.Unlock()
 	return cap(*b.buffer)
 }
 
 func (b *FastMpmc[T]) IsEmpty() bool {
-	b.bufferMu.Lock()
-	defer b.bufferMu.Unlock()
-	return len(*b.buffer) == 0
-}
-
-func (b *FastMpmc[T]) LenNoLock() int {
-	return len(*b.buffer)
-}
-
-func (b *FastMpmc[T]) CapNoLock() int {
-	return cap(*b.buffer)
-}
-
-func (b *FastMpmc[T]) IsEmptyNoLock() bool {
 	return len(*b.buffer) == 0
 }

@@ -365,8 +365,8 @@ func TestFastMpmc_LenNoLock(t *testing.T) {
 	q.bufferMu.Lock()
 	defer q.bufferMu.Unlock()
 
-	if q.LenNoLock() != 3 {
-		t.Errorf("Expected length 3, got %d", q.LenNoLock())
+	if q.Len() != 3 {
+		t.Errorf("Expected length 3, got %d", q.Len())
 	}
 }
 
@@ -376,8 +376,8 @@ func TestFastMpmc_CapNoLock(t *testing.T) {
 	q.bufferMu.Lock()
 	defer q.bufferMu.Unlock()
 
-	if q.CapNoLock() != 5 {
-		t.Errorf("Expected capacity 5, got %d", q.CapNoLock())
+	if q.Cap() != 5 {
+		t.Errorf("Expected capacity 5, got %d", q.Cap())
 	}
 }
 
@@ -387,17 +387,18 @@ func TestFastMpmc_IsEmptyNoLock(t *testing.T) {
 	q.bufferMu.Lock()
 	defer q.bufferMu.Unlock()
 
-	if !q.IsEmptyNoLock() {
+	if !q.IsEmpty() {
 		t.Error("Expected queue to be empty")
 	}
 
 	*q.buffer = append(*q.buffer, 1)
-	if q.IsEmptyNoLock() {
+	if q.IsEmpty() {
 		t.Error("Expected queue to be non-empty")
 	}
 }
 
 func TestConcurrentSwapAndWaitSwap(t *testing.T) {
+	t.Parallel()
 	const (
 		numWorkers     = 10
 		numOperations  = 1000
@@ -471,6 +472,7 @@ func TestEdgeCaseSwapAndWaitSwap(t *testing.T) {
 }
 
 func TestConcurrentSwapAndWaitSwap2(t *testing.T) {
+	t.Parallel()
 	const (
 		iterations = 2000
 		bufSize    = 10
@@ -567,6 +569,8 @@ func TestTryPopAll2(t *testing.T) {
 }
 
 func TestTryPopAllConcurrent(t *testing.T) {
+	t.Parallel()
+
 	q := NewFastMpmc[int](10)
 	var wg sync.WaitGroup
 	iterations := 3000
@@ -1017,6 +1021,7 @@ func TestWaitSwapBufferContext_Cancel(t *testing.T) {
 }
 
 func TestWaitSwapBufferConcurrent(t *testing.T) {
+	t.Parallel()
 	const (
 		pushGoRoutines  = 10
 		swapGoRoutines  = 5
@@ -1223,7 +1228,7 @@ func benchmarkMPMCSimpleMQ(b *testing.B, _, producers, consumers int) {
 			for {
 				*buffer = (*buffer)[:0]
 				old, ok := mq.WaitSwapBufferContext(ctx, buffer)
-				if !ok && mq.LenNoLock() == 0 {
+				if !ok && mq.Len() == 0 {
 					return
 				}
 				if old != nil {
@@ -1380,7 +1385,7 @@ func benchmarkMPMCSimpleMQ_BigStruct(b *testing.B, _, producers, consumers int) 
 			for {
 				*buffer = (*buffer)[:0]
 				old, ok := mq.WaitSwapBufferContext(ctx, buffer)
-				if !ok && mq.LenNoLock() == 0 {
+				if !ok && mq.Len() == 0 {
 					return
 				}
 				if old != nil {
@@ -1527,7 +1532,7 @@ func benchmarkMPSCSimpleMQ(b *testing.B, _, producers int) {
 	for {
 		*buffer = (*buffer)[:0]
 		old, ok := mq.WaitSwapBufferContext(ctx, buffer)
-		if !ok && mq.LenNoLock() == 0 {
+		if !ok && mq.Len() == 0 {
 			break
 		}
 		if old != nil {
@@ -1646,7 +1651,7 @@ func benchmarkMPSCSimpleMQ_BigStruct(b *testing.B, _, producers int) {
 	for {
 		*buffer = (*buffer)[:0]
 		old, ok := mq.WaitSwapBufferContext(ctx, buffer)
-		if !ok && mq.LenNoLock() == 0 {
+		if !ok && mq.Len() == 0 {
 			break
 		}
 		if old != nil {
