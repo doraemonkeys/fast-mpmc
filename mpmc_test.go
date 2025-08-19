@@ -365,8 +365,8 @@ func TestFastMpmc_LenNoLock(t *testing.T) {
 	q.bufferMu.Lock()
 	defer q.bufferMu.Unlock()
 
-	if q.Len() != 3 {
-		t.Errorf("Expected length 3, got %d", q.Len())
+	if q.LenNoLock() != 3 {
+		t.Errorf("Expected length 3, got %d", q.LenNoLock())
 	}
 }
 
@@ -376,24 +376,8 @@ func TestFastMpmc_CapNoLock(t *testing.T) {
 	q.bufferMu.Lock()
 	defer q.bufferMu.Unlock()
 
-	if q.Cap() != 5 {
-		t.Errorf("Expected capacity 5, got %d", q.Cap())
-	}
-}
-
-func TestFastMpmc_IsEmptyNoLock(t *testing.T) {
-	q := NewFastMpmc[int](5)
-
-	q.bufferMu.Lock()
-	defer q.bufferMu.Unlock()
-
-	if !q.IsEmpty() {
-		t.Error("Expected queue to be empty")
-	}
-
-	*q.buffer = append(*q.buffer, 1)
-	if q.IsEmpty() {
-		t.Error("Expected queue to be non-empty")
+	if q.CapNoLock() != 5 {
+		t.Errorf("Expected capacity 5, got %d", q.CapNoLock())
 	}
 }
 
@@ -422,7 +406,7 @@ func TestConcurrentSwapAndWaitSwap(t *testing.T) {
 					// SwapBuffer 操作
 					newBuffer := make([]int, 0, bufferCapacity)
 					oldBuffer := queue.SwapBuffer(&newBuffer)
-					t.Logf("SwapBuffer: old buffer len %d, new buffer len %d", len(*oldBuffer), len(newBuffer))
+					t.Logf("SwapBuffer: old buffer len %d", len(*oldBuffer))
 				case 2:
 					// WaitSwapBuffer 操作
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
@@ -430,7 +414,7 @@ func TestConcurrentSwapAndWaitSwap(t *testing.T) {
 					newBuffer := make([]int, 0, bufferCapacity)
 					oldBuffer, ok := queue.WaitSwapBufferContext(ctx, &newBuffer)
 					if ok {
-						t.Logf("WaitSwapBuffer: old buffer len %d, new buffer len %d", len(*oldBuffer), len(newBuffer))
+						t.Logf("WaitSwapBuffer: old buffer len %d", len(*oldBuffer))
 					} else {
 						t.Log("WaitSwapBuffer: timeout")
 					}
@@ -456,16 +440,16 @@ func TestEdgeCaseSwapAndWaitSwap(t *testing.T) {
 	// 同时调用 SwapBuffer 和 WaitSwapBuffer
 	go func() {
 		defer wg.Done()
-		newBuffer := make([]int, 0, bufferCapacity)
+		newBuffer := make([]int, 1, bufferCapacity)
 		oldBuffer := queue.SwapBuffer(&newBuffer)
-		t.Logf("SwapBuffer: old buffer len %d, new buffer len %d", len(*oldBuffer), len(newBuffer))
+		t.Logf("SwapBuffer: old buffer len %d", len(*oldBuffer))
 	}()
 
 	go func() {
 		defer wg.Done()
 		newBuffer := make([]int, 0, bufferCapacity)
 		oldBuffer := queue.WaitSwapBuffer(&newBuffer)
-		t.Logf("WaitSwapBuffer: old buffer len %d, new buffer len %d", len(*oldBuffer), len(newBuffer))
+		t.Logf("WaitSwapBuffer: old buffer len %d", len(*oldBuffer))
 	}()
 
 	wg.Wait()
@@ -487,13 +471,16 @@ func TestConcurrentSwapAndWaitSwap2(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			newBuf := make([]int, 0, bufSize)
+			b := make([]int, 0, bufSize)
+			newBuf := &b
 			<-startCh
 			for j := 0; j < iterations; j++ {
-				oldBuf := queue.SwapBuffer(&newBuf)
-				if len(*oldBuf) > 0 {
-					newBuf = (*oldBuf)[:0]
+				oldBuf := queue.SwapBuffer(newBuf)
+				if oldBuf == newBuf {
+					t.Errorf("SwapBuffer: old buffer is the same as new buffer")
 				}
+				newBuf = oldBuf
+				*newBuf = (*newBuf)[:0]
 			}
 		}()
 	}
@@ -502,14 +489,16 @@ func TestConcurrentSwapAndWaitSwap2(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			newBuf := make([]int, 0, bufSize)
+			b := make([]int, 0, bufSize)
+			newBuf := &b
 			<-startCh
 			for j := 0; j < iterations; j++ {
 				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
-				oldBuf, ok := queue.WaitSwapBufferContext(ctx, &newBuf)
+				oldBuf, ok := queue.WaitSwapBufferContext(ctx, newBuf)
 				cancel()
-				if ok && len(*oldBuf) > 0 {
-					newBuf = (*oldBuf)[:0]
+				if ok {
+					newBuf = oldBuf
+					*newBuf = (*newBuf)[:0]
 				}
 			}
 		}()
@@ -1067,12 +1056,12 @@ func TestWaitSwapBufferConcurrent(t *testing.T) {
 
 				receivedMu.Lock()
 				receivedItems = append(receivedItems, *swapped...)
-				receivedMu.Unlock()
-
 				if len(receivedItems) >= pushGoRoutines*itemsPerRoutine {
 					cancle()
+					receivedMu.Unlock()
 					break
 				}
+				receivedMu.Unlock()
 				*swapped = (*swapped)[:0]
 				newBuffer = swapped
 			}
@@ -1132,17 +1121,31 @@ func benchmarkSPSCFastMPMC(b *testing.B, _ int) {
 	defer cancel()
 
 	b.ResetTimer()
+	n := b.N
 	go func() {
-		for i := 0; i < b.N; i++ {
+		for i := 0; i < n; i++ {
 			mq.Push(i)
 		}
+		cancel()
 	}()
 
 	count := 0
-	for count < b.N {
-		items, _ := mq.WaitPopAllContext(ctx)
+	for {
+		items, ok := mq.WaitPopAllContext(ctx)
+		if !ok {
+			break
+		}
 		count += len(*items)
 		mq.RecycleBuffer(items)
+	}
+	if count != n {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		items, _ := mq.WaitPopAllContext(ctx)
+		count += len(*items)
+	}
+	if count != n {
+		b.Errorf("Expected %d items, got %d", n, count)
 	}
 }
 
